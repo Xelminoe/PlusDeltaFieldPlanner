@@ -49,14 +49,11 @@
                 $('#dfp-outer').text(DFP.triScoreRaw(tri[0], tri[1], tri[2]).toFixed(1));
             } catch (e) { alert(e && e.message ? e.message : String(e)); }
         });
-        const $runBtn   = $('<button type="button">Optimize</button>').click(() => {
+        const $runBtn = $('<button type="button">Optimize</button>').click(() => {
             const sec = parseInt($('#dfp-limit').val(), 10) || 120;
-            try {
-                DFP.solveAndRender(sec);
-            } catch (e) {
-                alert(e && e.message ? e.message : String(e));
-            }
+            DFP.solveAndRender(sec).catch(e => alert(e && e.message ? e.message : String(e)));
         });
+
 
         const $stopBtn  = $('<button type="button">Stop</button>').click(() => {
             if (DFP.stopOptimization) DFP.stopOptimization();
@@ -299,6 +296,19 @@
 
     DFP.EPS = 1e-12;
 
+    // cooperative yield: let UI timers/paint run
+    DFP._lastYield = 0;
+    DFP._yieldIntervalMs = 25; // try to yield every ~25ms
+    DFP.yieldIfNeeded = async function yieldIfNeeded() {
+        const now = Date.now();
+        if (now - DFP._lastYield >= DFP._yieldIntervalMs) {
+            DFP._lastYield = now;
+            // yield to macrotask queue so setInterval/requestAnimationFrame can run
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+    };
+
+
     // neutral link color (Ingress-neutral gray)
     DFP.NEUTRAL_LINK_COLOR = '#9e9e9e';
 
@@ -378,7 +388,8 @@
     };
 
     // Best(i,j,k): return {score, choice} with memoization; microfielding recursion
-    DFP.Best = function Best(i, j, k) {
+    // Best(i,j,k) -> Promise<{score:number, choice:number|null}>
+    DFP.Best = async function Best(i, j, k) {
         const key = DFP.keyOf(i, j, k);
         const hit = DFP.memo.get(key);
         if (hit) return hit;
@@ -390,12 +401,13 @@
             return base;
         }
 
-        // if time is up, return a greedy feasible choice (only immediate gain)
+        // time cap: greedy fallback (still async so UI can update)
         if (DFP.timeExceeded()) {
             let bestP = null, bestGain = -Infinity;
             for (const p of cand) {
                 const gain = DFP.triScore(i, j, p) + DFP.triScore(j, k, p) + DFP.triScore(k, i, p);
                 if (gain > bestGain) { bestGain = gain; bestP = p; }
+                await DFP.yieldIfNeeded();
             }
             const g = { score: bestGain, choice: bestP };
             DFP.memo.set(key, g);
@@ -404,23 +416,24 @@
 
         let best = -Infinity, bestP = null;
         for (const p of cand) {
-            // immediate gain: three new fields at this split
+            await DFP.yieldIfNeeded(); // let elapsed/UI update
+
             const gain = DFP.triScore(i, j, p) + DFP.triScore(j, k, p) + DFP.triScore(k, i, p);
-            // recursive gains
-            const s1 = DFP.Best(i, j, p).score;
-            const s2 = DFP.Best(j, k, p).score;
-            const s3 = DFP.Best(k, i, p).score;
+            const s1 = (await DFP.Best(i, j, p)).score;
+            const s2 = (await DFP.Best(j, k, p)).score;
+            const s3 = (await DFP.Best(k, i, p)).score;
             const total = gain + s1 + s2 + s3;
+
             if (total > best) { best = total; bestP = p; }
 
-            // optional: opportunistic time check between iterations
-            if (DFP.timeExceeded()) break;
+            if (DFP.timeExceeded()) break; // bail early if cap hit mid-loop
         }
 
         const out = { score: best, choice: bestP };
         DFP.memo.set(key, out);
         return out;
     };
+
 
     // reconstruct edges by following memoized choices; returns {edges:Set<string>, faces:number}
     DFP.reconstructEdges = function reconstructEdges(i, j, k) {
@@ -449,40 +462,36 @@
     };
 
     // solve & render best microfielding within time limit
-    DFP.solveAndRender = function solveAndRender(secondsLimit) {
-        // 1) collect anchors and interior portals (as before)
-        const triangle = DFP.readOuterTriangle();       // 3 anchors: [{lat,lng,ref},...]
+    DFP.solveAndRender = async function solveAndRender(secondsLimit) {
+        const triangle = DFP.readOuterTriangle();
         const portals = DFP.buildPortalList();
         const inside = DFP.getInsidePortals(triangle, portals);
 
-        // build points array: anchors first, then inside
         DFP.points = triangle.concat(inside);
+        const outerA = DFP.points[0], outerB = DFP.points[1], outerC = DFP.points[2];
 
-        // reset caches
+        // reset caches/time state
         DFP.memo.clear();
         DFP.insideCache.clear();
         DFP.scoreCache.clear();
         DFP.stopFlag = false;
         DFP.limitMs = Math.max(1, Math.floor((secondsLimit || 120) * 1000));
         DFP.startMs = Date.now();
+        DFP._lastYield = DFP.startMs;
 
-        // elapsed UI ticker (note: heavy runs may only update at the end due to JS event loop)
-        const $elapsed = $('#dfp-elapsed');
+        // live elapsed update
         const tick = setInterval(() => {
-            if ($elapsed.length) {
+            const el = document.getElementById('dfp-elapsed');
+            if (el) {
                 const sec = Math.floor((Date.now() - DFP.startMs) / 1000);
-                $elapsed.text(`${sec}s`);
+                el.textContent = `${sec}s`;
             }
         }, 250);
 
-        // build points array: anchors first, then inside
-        DFP.points = triangle.concat(inside);
-        const outerA = DFP.points[0], outerB = DFP.points[1], outerC = DFP.points[2];
+        // solve (async)
+        const res = await DFP.Best(0, 1, 2);
 
-        // 2) solve from the outer triangle (0,1,2)
-        const res = DFP.Best(0, 1, 2);
-
-        // 3) draw: outer boundary first, then unique micro edges
+        // draw
         if (DFP.layerGroup) DFP.layerGroup.clearLayers();
         DFP.renderOuterBoundary([outerA, outerB, outerC], false);
 
@@ -494,15 +503,23 @@
                 color: DFP.NEUTRAL_LINK_COLOR,
                 weight: 2,
                 opacity: 0.9
-                });
+            });
             DFP.layerGroup.addLayer(pl);
         });
 
-        // 4) update UI
+        // finalize UI
         clearInterval(tick);
-        $('#dfp-outer').text(DFP.triScoreRaw(outerA, outerB, outerC));
-        $('#dfp-best').text(res.score.toFixed(1));
-        $('#dfp-faces').text(faces);
+        document.getElementById('dfp-outer')?.replaceChildren(
+            document.createTextNode(Math.round(DFP.triScoreRaw(outerA, outerB, outerC)))
+        );
+        document.getElementById('dfp-best')?.replaceChildren(
+            document.createTextNode(Math.round(res.score))
+        );
+        document.getElementById('dfp-faces')?.replaceChildren(
+            document.createTextNode(String(faces))
+        );
+        const el = document.getElementById('dfp-elapsed');
+        if (el) el.textContent = `${Math.floor((Date.now() - DFP.startMs) / 1000)}s`;
     };
 
     DFP.setup = function setup() {
