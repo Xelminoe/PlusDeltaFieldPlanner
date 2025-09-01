@@ -2,7 +2,7 @@
 // @id             iitc-plugin-plus-delta-field-planner
 // @name           IITC plugin: Plus Delta Field Planner
 // @category       Misc
-// @version        1.0.0
+// @version        1.0.1
 // @author         gpt
 // @match          https://intel.ingress.com/*
 // @grant          none
@@ -24,8 +24,7 @@
 
         const $status = $(`
       <div id="dfp-status">
-        <div><b>Triangle:</b> not scanned</div>
-        <div><b>Outer score:</b> <span id="dfp-outer">-</span></div>
+        <div> Draw polygons to select portals, place markers to exclude them. Requires Draw-Tools. </div>
         <div><b>Elapsed:</b> <span id="dfp-elapsed">0s</span></div>
         <div><b>Best score:</b> <span id="dfp-best">-</span></div>
         <div><b>Faces:</b> <span id="dfp-faces">-</span></div>
@@ -34,40 +33,39 @@
 
 
         const $controls = $('<div>').css({ marginTop: '8px', display: 'flex', gap: '6px', alignItems: 'center' });
+        const $controls2 = $('<div>').css({ marginTop: '8px', display: 'flex', gap: '6px', alignItems: 'center' });
         const $limitLbl = $('<label for="dfp-limit">Time limit (s):</label>').css({ fontSize: '11px' });
         const $limitInp = $('<input id="dfp-limit" type="number" min="1" step="1" value="120" style="width:72px;">');
-        const $scanBtn  = $('<button type="button">Scan</button>').click(() => {
-            try {
-                const tri = DFP.readOuterTriangle(); // [{lat,lng,ref}, x3]
-                const inside = DFP.getInsidePortals(tri, DFP.buildPortalList());
-                // render boundary only (clear previous shapes)
-                DFP.renderOuterBoundary(tri, true);
-
-                // update panel
-                $('#dfp-status').find('div').first()
-                    .html(`<b>Triangle:</b> OK • Inside portals: ${inside.length}`);
-                $('#dfp-outer').text(DFP.triScoreRaw(tri[0], tri[1], tri[2]).toFixed(1));
-            } catch (e) { alert(e && e.message ? e.message : String(e)); }
-        });
-        const $runBtn = $('<button type="button">Optimize</button>').click(() => {
+        const $polyBtn = $('<button type="button">Optimize</button>').click(() => {
             const sec = parseInt($('#dfp-limit').val(), 10) || 120;
-            DFP.solveAndRender(sec).catch(e => alert(e && e.message ? e.message : String(e)));
+            DFP.solveFromPolygons(sec).catch(e => alert(e && e.message ? e.message : String(e)));
         });
-
-
         const $stopBtn  = $('<button type="button">Stop</button>').click(() => {
             if (DFP.stopOptimization) DFP.stopOptimization();
         });
+        const $exportBtn = $('<button type="button">Export to Draw Tools</button>').click(() => {
+            try {
+                DFP.exportPlanToDrawTools({
+                    includeHull: true,
+                    includeTriang: true,
+                    includeMicro: true
+                });
+                alert('Exported to Draw Tools.');
+            } catch (e) {
+                alert(e && e.message ? e.message : String(e));
+            }
+        });
 
-        $controls.append($limitLbl, $limitInp, $scanBtn, $runBtn, $stopBtn);
+        $controls.append($limitLbl, $limitInp, $polyBtn, $stopBtn,);
+        $controls2.append($exportBtn);
 
-        const $body = $('<div id="dfp-panel-body">').append($status, $controls);
+        const $body = $('<div id="dfp-panel-body">').append($status, $controls, $controls2);
 
         DFP.dlg = dialog({
             title: 'Δ Field Planner',
             html: $body,
             id: 'dfp-panel',
-            width: 360,
+            width: 330,
             closeCallback: function () { DFP.dlg = null; }
         });
     };
@@ -108,21 +106,6 @@
         return c;
     };
 
-    // Collect 3 drawn markers from draw-tools.
-    DFP.collectDrawToolMarkers = function collectDrawToolMarkers() {
-        if (!window.plugin.drawTools || !window.plugin.drawTools.drawnItems) {
-            throw new Error('draw-tools is not available.');
-        }
-        const markers = [];
-        window.plugin.drawTools.drawnItems.eachLayer(layer => {
-            if (layer instanceof L.Marker) {
-                const { lat, lng } = layer.getLatLng();
-                markers.push({ lat, lng });
-            }
-        });
-        return markers;
-    };
-
     // Build a flat list of currently loaded portals (lat/lng + ref).
     DFP.buildPortalList = function buildPortalList() {
         return Object.values(window.portals).map(p => ({
@@ -140,89 +123,96 @@
                               );
     };
 
-    // Read 3 anchors (A,B,C) from draw-tools and map them to real portals.
-    DFP.readOuterTriangle = function readOuterTriangle() {
-        const markers = DFP.collectDrawToolMarkers();
-        if (markers.length !== 3) {
-            throw new Error(`Expected exactly 3 markers, found ${markers.length}.`);
-        }
-        const plist = DFP.buildPortalList();
-        const triangle = markers.map(m => {
-            const match = DFP.matchMarkerToPortal(m, plist);
-            if (!match) throw new Error(`No portal found at ${m.lat}, ${m.lng}`);
-            return match;
-        });
-        return triangle; // [A,B,C], each {lat,lng,ref}
-    };
+    // --- polygons in draw-tools -> [{ outerRing:[{lat,lng}], holes:[[...]] }, ...]
+    DFP.collectSearchPolygons = function collectSearchPolygons() {
+        if (!window.plugin.drawTools || !window.plugin.drawTools.drawnItems)
+            throw new Error('draw-tools is not available.');
+        const res = [];
 
-    // Return portals strictly inside the triangle (exclude the 3 anchors).
-    DFP.getInsidePortals = function getInsidePortals(triangle, portalList) {
-        const polygon = triangle.map(p => ({ lat: p.lat, lng: p.lng }));
-        const isAnchor = (p) =>
-        triangle.some(v => Math.abs(v.lat - p.lat) < DFP.TOLERANCE &&
-                      Math.abs(v.lng - p.lng) < DFP.TOLERANCE);
-        return portalList.filter(p => !isAnchor(p) && DFP.pnpoly(polygon, p));
-    };
-
-    // Orchestrate: read outer triangle & count inside portals, then update panel.
-    DFP.scanTriangleAndCount = function scanTriangleAndCount() {
-        try {
-            const triangle = DFP.readOuterTriangle();
-            const portals  = DFP.buildPortalList();
-            const inside   = DFP.getInsidePortals(triangle, portals);
-
-            // Update panel
-            const $status = $('#dfp-status');
-            if ($status.length) {
-                $status.html(
-                    [
-                        '<b>Triangle read:</b> OK',
-                        'Anchors: 3',
-                        `Inside portals: ${inside.length}`,
-                        `Total (anchors + inside): ${inside.length + 3}`
-          ].join('<br/>')
-                );
+        window.plugin.drawTools.drawnItems.eachLayer(drawnItem => {
+            if (drawnItem instanceof L.GeodesicPolygon) {
+                // 参考 poly-counts2: 用 _latlngs 近似采样曲线边界  :contentReference[oaicite:3]{index=3}
+                const latlngs = drawnItem._latlngs;
+                if (latlngs && latlngs.length) {
+                    const polys = Array.isArray(latlngs[0].lng)
+                    ? latlngs.map(r => r.map(pt => ({lat:pt.lat, lng:pt.lng})))
+                    : [latlngs.map(pt => ({lat:pt.lat, lng:pt.lng}))];
+                    polys.forEach(poly => res.push({ type:'polygon', outerRing: poly, holes: [] }));
+                }
+            } else if (drawnItem instanceof L.Polygon || (typeof L.MultiPolygon==="function" && drawnItem instanceof L.MultiPolygon)) {
+                // 参考 poly-counts2: toGeoJSON() -> coordinates -> [ [ring], [hole], ... ]  :contentReference[oaicite:4]{index=4}
+                const g = drawnItem.toGeoJSON();
+                let coords = g.geometry.coordinates;
+                if (coords[0].length===2 && typeof coords[0][0]==="number") coords=[coords]; // normalize
+                coords.forEach(polygonCoords => {
+                    if (polygonCoords[0].length===2 && typeof polygonCoords[0][0]==="number")
+                        polygonCoords=[polygonCoords];
+                    const searchPoly = { type:'polygon', outerRing:[], holes:[] };
+                    polygonCoords.forEach((linearRing, j) => {
+                        const ring = linearRing.map(([lng,lat]) => ({lat,lng}));
+                        if (j===0) searchPoly.outerRing = ring; else searchPoly.holes.push(ring);
+                    });
+                    res.push(searchPoly);
+                });
+            } else {
+                // ignore markers/polyline/circle  (circle 可后续需要时再加)
             }
-        } catch (err) {
-            alert(err && err.message ? err.message : String(err));
-        }
+        });
+
+        return res;
     };
+
+    // --- portals ∩ polygons
+    DFP.portalsInPolygons = function portalsInPolygons(portalList, polys) {
+        const picked = [];
+        for (const p of portalList) {
+            for (const poly of polys) {
+                if (poly.type==='polygon' && DFP.pointInSearchPolygonInclusive({lat:p.lat,lng:p.lng}, poly)) {
+                    picked.push(p); break;
+                }
+            }
+        }
+        return picked;
+    };
+
+    DFP.collectExclusionKeys = function collectExclusionKeys(portalList) {
+        const keys = new Set();
+        if (!window.plugin.drawTools || !window.plugin.drawTools.drawnItems) return keys;
+        window.plugin.drawTools.drawnItems.eachLayer(layer => {
+            if (layer instanceof L.Marker) {
+                const {lat,lng} = layer.getLatLng();
+                const m = DFP.matchMarkerToPortal({lat,lng}, portalList);
+                if (m) keys.add(DFP.key({lat:m.lat, lng:m.lng}));
+            }
+        });
+        return keys;
+    };
+
+    DFP.convexHullIdx = function convexHullIdx(points) {
+        // points: Array<{lat,lng,ref}>
+        const n = points.length;
+        if (n < 3) return [];
+        const pts = points.map((p,idx)=>({x:p.lng, y:p.lat, idx}));
+        pts.sort((a,b)=> a.x===b.x ? a.y-b.y : a.x-b.x);
+        const cross = (o,a,b)=> (a.x-o.x)*(b.y-o.y) - (a.y-o.y)*(b.x-o.x);
+
+        const lower=[];
+        for (const p of pts) {
+            while (lower.length>=2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop();
+            lower.push(p);
+        }
+        const upper=[];
+        for (let i=pts.length-1;i>=0;i--) {
+            const p=pts[i];
+            while (upper.length>=2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop();
+            upper.push(p);
+        }
+        const hull = lower.slice(0,-1).concat(upper.slice(0,-1));
+        return hull.map(h=>h.idx); // 索引相对于传入的 points 数组
+    };
+
 
     // ---- geometry & optimization for best triangulation (time-bounded) ----
-    // ---- outer triangle helpers ----
-
-    // score for raw points (lat/lng objects)
-    DFP.triScoreRaw = function triScoreRaw(a, b, c) {
-        const area = DFP.triArea(a, b, c);
-        const d2 = (p, q) => {
-            const dx = p.lat - q.lat, dy = p.lng - q.lng;
-            return dx*dx + dy*dy;
-        };
-        const L2 = Math.max(d2(a,b), d2(b,c), d2(c,a));
-        if (L2 <= 0 || area <= 0) return 100; // degenerate -> base score
-        const eq = Math.min(1, area / ((Math.sqrt(3)/4) * L2));
-        return Math.round(100 * (1 + eq));
-    };
-
-    // render ONLY the outer triangle boundary (clear layer if requested)
-    DFP.renderOuterBoundary = function renderOuterBoundary(triangle, clearFirst = true) {
-        if (!DFP.layerGroup) return;
-        if (clearFirst) DFP.layerGroup.clearLayers();
-        const A = triangle[0], B = triangle[1], C = triangle[2];
-
-        const add = (P, Q) => {
-            // distinct style to differentiate from micro edges
-            const line = L.polyline([[P.lat, P.lng], [Q.lat, Q.lng]], {
-                color: DFP.NEUTRAL_LINK_COLOR,
-                weight: 3,
-                opacity: 1.0,
-                dashArray: '8,6'
-            });
-            DFP.layerGroup.addLayer(line);
-        };
-        add(A, B); add(B, C); add(C, A);
-    };
-
 
     // orientation (signed double area); >0: ccw, <0: cw, =0: collinear
     DFP.orient2d = function orient2d(a, b, c) {
@@ -283,6 +273,71 @@
         const hasPos = (o1 > 0) || (o2 > 0) || (o3 > 0);
         return !(hasNeg && hasPos);
     };
+
+    // —— 将 "u-v" 边键转为坐标
+    DFP._edgeToLatLngPair = function(edgeKey, points) {
+        const [u, v] = edgeKey.split('-').map(Number);
+        const P = points[u], Q = points[v];
+        return [[P.lat, P.lng], [Q.lat, Q.lng]];
+    };
+
+    // —— 统一的“画一条折线到 draw-tools”
+    // 优先使用 Draw Tools Plus 的 drawPolyline（与 link-prolongation 相同调用方式）
+    // 否则回退到原生 draw-tools：直接往 drawnItems 加一条 L.polyline
+    DFP._drawOnePolylineToDT = function(latlngs, color) {
+        if (window.plugin.drawToolsPlus && typeof window.plugin.drawToolsPlus.drawPolyline === 'function') {
+            // Draw Tools Plus 路径（参考 link-prolongation） :contentReference[oaicite:1]{index=1}
+            window.plugin.drawToolsPlus.drawPolyline(latlngs.map(([la,ln]) => L.latLng(la,ln)), color);
+        } else if (window.plugin.drawTools && window.plugin.drawTools.drawnItems) {
+            // 原生 draw-tools 路径
+            const line = L.polyline(latlngs, { color: color || '#20a8b1', weight: 3, opacity: 1 });
+            window.plugin.drawTools.drawnItems.addLayer(line);
+            // 可选：若你的 draw-tools 版本提供保存/同步接口，可在此调用 window.plugin.drawTools.save() 或同等方法
+        } else {
+            throw new Error('Draw-Tools plugin is required.');
+        }
+    };
+
+    // —— 导出当前 DFP.lastPlan 为 draw-tools 的多条 polyline
+    // options: { includeHull?:true, includeTriang?:true, includeMicro?:true, colorHull?, colorTri?, colorMicro? }
+    DFP.exportPlanToDrawTools = function(options = {}) {
+        const plan = DFP.lastPlan;
+        if (!plan) throw new Error('No plan to export. Run the planner first.');
+
+        const {
+            includeHull = true,
+            includeTriang = true,
+            includeMicro = true,
+            colorHull = '#9e9e9e',
+            colorTri = '#9e9e9e',
+            colorMicro = '#9e9e9e'
+        } = options;
+
+        const points = plan.points;
+        const addEdge = (edgeKey, color) => {
+            const latlngs = DFP._edgeToLatLngPair(edgeKey, points);
+            DFP._drawOnePolylineToDT(latlngs, color);
+        };
+
+        // 1) 凸包边
+        if (includeHull && plan.hull?.length >= 3) {
+            for (let i = 0; i < plan.hull.length; i++) {
+                const u = plan.hull[i], v = plan.hull[(i+1) % plan.hull.length];
+                addEdge(`${Math.min(u,v)}-${Math.max(u,v)}`, colorHull);
+            }
+        }
+
+        // 2) 三角剖分对角线
+        if (includeTriang && plan.diagonals?.length) {
+            for (const key of plan.diagonals) addEdge(key, colorTri);
+        }
+
+        // 3) 内部 microfield 边
+        if (includeMicro && plan.microEdges?.length) {
+            for (const key of plan.microEdges) addEdge(key, colorMicro);
+        }
+    };
+
 
     // ---- Microfielding DP solver (time-bounded) ----
     // Points: anchors first (indices 0,1,2), then interior portals.
@@ -374,13 +429,14 @@
         if (cached) return cached;
         const [i, j, k] = key.split(',').map(Number);
         const res = [];
-        for (let idx = 3; idx < DFP.points.length; idx++) {
+        for (let idx = 0; idx < DFP.points.length; idx++) {
             if (idx === i || idx === j || idx === k) continue;
             if (DFP.pointInTriStrict(DFP.points[idx], i, j, k)) res.push(idx);
         }
         DFP.insideCache.set(key, res);
         return res;
     };
+
 
     // time check
     DFP.timeExceeded = function timeExceeded() {
@@ -390,13 +446,14 @@
     // Best(i,j,k): return {score, choice} with memoization; microfielding recursion
     // Best(i,j,k) -> Promise<{score:number, choice:number|null}>
     DFP.Best = async function Best(i, j, k) {
+        const baseTri = DFP.triScore(i, j, k);
         const key = DFP.keyOf(i, j, k);
         const hit = DFP.memo.get(key);
         if (hit) return hit;
 
         const cand = DFP.getInsideForKey(key);
         if (cand.length === 0) {
-            const base = { score: 0, choice: null };
+            const base = { score: baseTri, choice: null };
             DFP.memo.set(key, base);
             return base;
         }
@@ -406,7 +463,7 @@
             let bestP = null, bestGain = -Infinity;
             for (const p of cand) {
                 const gain = DFP.triScore(i, j, p) + DFP.triScore(j, k, p) + DFP.triScore(k, i, p);
-                if (gain > bestGain) { bestGain = gain; bestP = p; }
+                if (gain > baseTri + bestGain) { bestGain = gain; bestP = p; }
                 await DFP.yieldIfNeeded();
             }
             const g = { score: bestGain, choice: bestP };
@@ -414,15 +471,14 @@
             return g;
         }
 
-        let best = -Infinity, bestP = null;
+        let best = baseTri, bestP = null;
         for (const p of cand) {
             await DFP.yieldIfNeeded(); // let elapsed/UI update
 
-            const gain = DFP.triScore(i, j, p) + DFP.triScore(j, k, p) + DFP.triScore(k, i, p);
             const s1 = (await DFP.Best(i, j, p)).score;
             const s2 = (await DFP.Best(j, k, p)).score;
             const s3 = (await DFP.Best(k, i, p)).score;
-            const total = gain + s1 + s2 + s3;
+            const total = baseTri + s1 + s2 + s3;
 
             if (total > best) { best = total; bestP = p; }
 
@@ -461,65 +517,187 @@
         return { edges, faces: usedSplitNodes * 3 };
     };
 
-    // solve & render best microfielding within time limit
-    DFP.solveAndRender = async function solveAndRender(secondsLimit) {
-        const triangle = DFP.readOuterTriangle();
-        const portals = DFP.buildPortalList();
-        const inside = DFP.getInsidePortals(triangle, portals);
+    // 判断点P是否在有向线段AB上（带公差）
+    DFP._EPS = 1e-9; // 角点/边界容差（度）
+    DFP._pointOnSegment = function(A, B, P) {
+        const ax=A.lat, ay=A.lng, bx=B.lat, by=B.lng, px=P.lat, py=P.lng;
+        // 面积接近0（叉积）
+        const cross = (bx-ax)*(py-ay) - (by-ay)*(px-ax);
+        if (Math.abs(cross) > DFP._EPS) return false;
+        // 投影在线段范围内（点积）
+        const dot = (px-ax)*(bx-ax) + (py-ay)*(by-ay);
+        if (dot < -DFP._EPS) return false;
+        const len2 = (bx-ax)*(bx-ax) + (by-ay)*(by-ay);
+        if (dot - len2 > DFP._EPS) return false;
+        return true;
+    };
 
-        DFP.points = triangle.concat(inside);
-        const outerA = DFP.points[0], outerB = DFP.points[1], outerC = DFP.points[2];
+    DFP._pointOnRing = function(ring, P) {
+        for (let i=0, j=ring.length-1; i<ring.length; j=i++) {
+            if (DFP._pointOnSegment(ring[j], ring[i], P)) return true;
+        }
+        return false;
+    };
 
-        // reset caches/time state
-        DFP.memo.clear();
-        DFP.insideCache.clear();
-        DFP.scoreCache.clear();
+    // 含洞的“宽松包含”
+    DFP.pointInSearchPolygonInclusive = function(point, searchPoly) {
+        // 在外圈边界上 -> 视为 inside
+        if (DFP._pointOnRing(searchPoly.outerRing, point)) return true;
+        // 先按原 pnpoly 判外圈
+        let inside = DFP.pnpoly(searchPoly.outerRing, point);
+        if (!inside) return false;
+        // 在任一洞边界上 -> 视为 outside
+        for (const hole of searchPoly.holes) {
+            if (DFP._pointOnRing(hole, point)) return false;
+            if (DFP.pnpoly(hole, point)) return false;
+        }
+        return true;
+    };
+
+
+    // 权值缓存（与 memo/insideCache/scoreCache 并列）
+    DFP.FCache = new Map();
+
+    DFP.weightOfTriangle = async function weightOfTriangle(i,k,j) {
+        const key = DFP.keyOf(i,k,j); // 规范化 CCW key  :contentReference[oaicite:10]{index=10}
+        const hit = DFP.FCache.get(key);
+        if (hit) return hit.score;
+        const res = await DFP.Best(i,k,j); // 你的“节点计分”版 Best（已含本三角分数）
+        DFP.FCache.set(key, res);
+        return res.score;
+    };
+
+    // 凸包顶点序列 H（为 DFP.points 的索引） -> {score,tris,diagonals}
+    DFP.triangulateHullMax = async function triangulateHullMax(H) {
+        const m = H.length;
+        if (m < 3) return { score:0, tris:[], diagonals:[] };
+
+        const dp = Array.from({length:m}, ()=>Array(m).fill(0));
+        const cut = Array.from({length:m}, ()=>Array(m).fill(-1));
+
+        for (let len=2; len<m; len++) {
+            for (let i=0; i+len<m; i++) {
+                const j = i+len;
+                if (j<=i+1) { dp[i][j]=0; continue; }
+                let best = -Infinity, bestK = -1;
+                for (let k=i+1; k<j; k++) {
+                    const ii=H[i], kk=H[k], jj=H[j];
+                    const w = await DFP.weightOfTriangle(ii,kk,jj);
+                    const cand = dp[i][k] + dp[k][j] + w;
+                    if (cand > best) { best=cand; bestK=k; }
+                    await DFP.yieldIfNeeded?.();
+                }
+                dp[i][j]=best; cut[i][j]=bestK;
+            }
+        }
+
+        // 回溯收集三角形与对角线
+        const tris = [];
+        const diags = new Set();
+        (function rec(i,j){
+            if (j<=i+1) return;
+            const k = cut[i][j];
+            const a=H[i], b=H[k], c=H[j];
+            tris.push([a,b,c]);
+            const add=(u,v)=>{ const x=Math.min(u,v), y=Math.max(u,v); diags.add(`${x}-${y}`); };
+            add(a,b); add(b,c);
+            rec(i,k); rec(k,j);
+        })(0,m-1);
+
+        return { score: dp[0][m-1], tris, diagonals:[...diags] };
+    };
+
+    DFP.solveFromPolygons = async function solveFromPolygons(secondsLimit) {
+        const portalList = DFP.buildPortalList();              // 已有  :contentReference[oaicite:11]{index=11}
+        const polys = DFP.collectSearchPolygons();             // 新
+        if (!polys.length) throw new Error('No polygon found. Draw polygon(s) first.');
+
+        // 参与集合 S
+        const S = DFP.portalsInPolygons(portalList, polys);
+
+        // 排除集合（marker 匹配真实门户）  :contentReference[oaicite:12]{index=12}
+        const exKeys = DFP.collectExclusionKeys(portalList);
+        const filtered = S.filter(p => !exKeys.has(DFP.key(p)));
+        if (filtered.length < 3) throw new Error('Not enough portals inside polygons after exclusions.');
+
+        // 凸包（基于 filtered 的索引）
+        const hullLocalIdx = DFP.convexHullIdx(filtered);
+        if (hullLocalIdx.length < 3) throw new Error('Convex hull has <3 vertices.');
+
+        // DFP.points：将“凸包点在前，内点在后”的顺序重排，方便 DP
+        const isHull = new Array(filtered.length).fill(false);
+        hullLocalIdx.forEach(id => { isHull[id]=true; });
+        const hullPoints = hullLocalIdx.map(id => filtered[id]);
+        const innerPoints = filtered.filter((_,idx)=>!isHull[idx]);
+        DFP.points = hullPoints.concat(innerPoints);      // 0..h-1 为 hull 顶点
+        const H = [...Array(hullPoints.length).keys()];  // [0..h-1]
+
+        // 计时/缓存
+        DFP.memo.clear(); DFP.insideCache.clear(); DFP.scoreCache.clear(); DFP.FCache.clear();
         DFP.stopFlag = false;
         DFP.limitMs = Math.max(1, Math.floor((secondsLimit || 120) * 1000));
-        DFP.startMs = Date.now();
-        DFP._lastYield = DFP.startMs;
+        DFP.startMs = Date.now(); DFP._lastYield = DFP.startMs;
 
-        // live elapsed update
         const tick = setInterval(() => {
             const el = document.getElementById('dfp-elapsed');
-            if (el) {
-                const sec = Math.floor((Date.now() - DFP.startMs) / 1000);
-                el.textContent = `${sec}s`;
-            }
+            if (el) el.textContent = `${Math.floor((Date.now()-DFP.startMs)/1000)}s`;
         }, 250);
 
-        // solve (async)
-        const res = await DFP.Best(0, 1, 2);
+        // 求解
+        const plan = await DFP.triangulateHullMax(H);
 
-        // draw
+        // 渲染
         if (DFP.layerGroup) DFP.layerGroup.clearLayers();
-        DFP.renderOuterBoundary([outerA, outerB, outerC], false);
 
-        const { edges, faces } = DFP.reconstructEdges(0, 1, 2);
-        edges.forEach(key => {
-            const [u, v] = key.split('-').map(Number);
+        // 画凸包边（虚线）
+        for (let i=0;i<H.length;i++){
+            const a=DFP.points[H[i]], b=DFP.points[H[(i+1)%H.length]];
+            DFP.layerGroup.addLayer(L.polyline([[a.lat,a.lng],[b.lat,b.lng]], {
+                color: DFP.NEUTRAL_LINK_COLOR, weight: 3, opacity: 1.0, dashArray:'8,6'
+            }));
+        }
+
+        // 画三角剖分的内部对角线（实线，粗一点）
+        for (const key of plan.diagonals) {
+            const [u,v] = key.split('-').map(Number);
             const P = DFP.points[u], Q = DFP.points[v];
-            const pl = L.polyline([[P.lat, P.lng], [Q.lat, Q.lng]], {
-                color: DFP.NEUTRAL_LINK_COLOR,
-                weight: 2,
-                opacity: 0.9
-            });
-            DFP.layerGroup.addLayer(pl);
+            DFP.layerGroup.addLayer(L.polyline([[P.lat,P.lng],[Q.lat,Q.lng]], {
+                color: DFP.NEUTRAL_LINK_COLOR, weight: 3, opacity: 1.0, dashArray:'8,6'
+            }));
+        }
+
+        // 三角内 microfield 边集合（合并去重）
+        const edgeSet = new Set(); let faceSum = 0;
+        for (const [i,k,j] of plan.tris) {
+            const {edges, faces} = DFP.reconstructEdges(i,k,j);
+            faceSum += faces;
+            edges.forEach(e => edgeSet.add(e));
+        }
+        faceSum += plan.tris.length;
+        edgeSet.forEach(key => {
+            const [u,v] = key.split('-').map(Number);
+            const P=DFP.points[u], Q=DFP.points[v];
+            DFP.layerGroup.addLayer(L.polyline([[P.lat,P.lng],[Q.lat,Q.lng]], {
+                color: DFP.NEUTRAL_LINK_COLOR, weight: 2, opacity: 0.9
+            }));
         });
 
-        // finalize UI
         clearInterval(tick);
-        document.getElementById('dfp-outer')?.replaceChildren(
-            document.createTextNode(Math.round(DFP.triScoreRaw(outerA, outerB, outerC)))
-        );
-        document.getElementById('dfp-best')?.replaceChildren(
-            document.createTextNode(Math.round(res.score))
-        );
-        document.getElementById('dfp-faces')?.replaceChildren(
-            document.createTextNode(String(faces))
-        );
+        document.getElementById('dfp-best')?.replaceChildren(document.createTextNode(Math.round(plan.score)));
+        document.getElementById('dfp-faces')?.replaceChildren(document.createTextNode(String(faceSum)));
         const el = document.getElementById('dfp-elapsed');
-        if (el) el.textContent = `${Math.floor((Date.now() - DFP.startMs) / 1000)}s`;
+        if (el) el.textContent = `${Math.floor((Date.now()-DFP.startMs)/1000)}s`;
+
+        // 渲染完毕后（faces/elapsed 已更新）
+        // 缓存本次规划结果，供“导出到 Draw Tools”使用
+        DFP.lastPlan = {
+            points: DFP.points,                 // Array<{lat,lng,ref}>
+            hull: H.slice(),                    // 凸包顶点索引序列（相对 points）
+            tris: plan.tris.slice(),            // 三角剖分三角形索引三元组
+            diagonals: plan.diagonals.slice(),  // "u-v" 字符串
+            microEdges: [...edgeSet]            // "u-v" 字符串（内部微田字边，已去重）
+        };
+
     };
 
     DFP.setup = function setup() {
