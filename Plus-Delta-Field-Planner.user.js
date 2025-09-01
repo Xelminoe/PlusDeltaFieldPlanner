@@ -288,19 +288,17 @@
         if (window.plugin.drawToolsPlus && typeof window.plugin.drawToolsPlus.drawPolyline === 'function') {
             // Draw Tools Plus 路径（参考 link-prolongation） :contentReference[oaicite:1]{index=1}
             window.plugin.drawToolsPlus.drawPolyline(latlngs.map(([la,ln]) => L.latLng(la,ln)), color);
-        } else if (window.plugin.drawTools && window.plugin.drawTools.drawnItems) {
-            // 原生 draw-tools 路径
-            const line = L.polyline(latlngs, { color: color || '#20a8b1', weight: 3, opacity: 1 });
-            window.plugin.drawTools.drawnItems.addLayer(line);
-            // 可选：若你的 draw-tools 版本提供保存/同步接口，可在此调用 window.plugin.drawTools.save() 或同等方法
         } else {
-            throw new Error('Draw-Tools plugin is required.');
+            throw new Error('Draw Tools Plus is required for exporting items.');
         }
     };
 
     // —— 导出当前 DFP.lastPlan 为 draw-tools 的多条 polyline
     // options: { includeHull?:true, includeTriang?:true, includeMicro?:true, colorHull?, colorTri?, colorMicro? }
     DFP.exportPlanToDrawTools = function(options = {}) {
+        if (!(window.plugin.drawToolsPlus && typeof window.plugin.drawToolsPlus.drawPolyline === 'function')) {
+            throw new Error('Draw Tools Plus is required. Please install/enable the Draw Tools Plus plugin.');
+        }
         const plan = DFP.lastPlan;
         if (!plan) throw new Error('No plan to export. Run the planner first.');
 
