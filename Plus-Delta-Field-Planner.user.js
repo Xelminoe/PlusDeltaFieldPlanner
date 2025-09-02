@@ -2,7 +2,7 @@
 // @id             iitc-plugin-plus-delta-field-planner
 // @name           IITC plugin: Plus Delta Field Planner
 // @category       Misc
-// @version        1.0.1
+// @version        1.0.2
 // @author         gpt
 // @match          https://intel.ingress.com/*
 // @grant          none
@@ -65,7 +65,7 @@
             title: 'Δ Field Planner',
             html: $body,
             id: 'dfp-panel',
-            width: 330,
+            width: 300,
             closeCallback: function () { DFP.dlg = null; }
         });
     };
@@ -393,11 +393,28 @@
         };
         return Math.max(d2(a,b), d2(b,c), d2(c,a));
     };
+    // Replace DFP.equil with a metric-safe version (geodesic edges + Heron area)
     DFP.equil = function equil(a, b, c) {
-        const A = DFP.triArea(a, b, c);
-        const L2 = DFP.maxEdgeLen2(a, b, c);
-        if (L2 <= 0 || A <= 0) return 0;
-        return Math.min(1, A / ((Math.sqrt(3)/4) * L2));
+        // Use Leaflet geodesic distances (meters) to avoid lat/lng anisotropy.
+        const A = L.latLng(a.lat, a.lng);
+        const B = L.latLng(b.lat, b.lng);
+        const C = L.latLng(c.lat, c.lng);
+
+        const ab = A.distanceTo(B);
+        const bc = B.distanceTo(C);
+        const ca = C.distanceTo(A);
+
+        // Heron area (meters^2), robust to orientation
+        const s  = 0.5 * (ab + bc + ca);
+        const sq = Math.max(s * (s - ab) * (s - bc) * (s - ca), 0);
+        const area = Math.sqrt(sq);
+
+        const Lmax = Math.max(ab, bc, ca);
+        if (Lmax <= 0 || area <= 0) return 0;
+
+        // E in [0,1]
+        const E = (4 * area) / (Math.sqrt(3) * Lmax * Lmax);
+        return Math.min(1, E);
     };
     DFP.triScore = function triScore(i, j, k) {
         // cache by CCW key (orientation doesn't change score because we use |area|)
