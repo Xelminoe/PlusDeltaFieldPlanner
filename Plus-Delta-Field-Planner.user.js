@@ -26,7 +26,7 @@
       <div id="dfp-status">
         <div> Draw polygons to select portals, place markers to exclude them. Requires Draw-Tools. </div>
         <div><b>Elapsed:</b> <span id="dfp-elapsed">0s</span></div>
-        <div><b>Best score:</b> <span id="dfp-best">-</span></div>
+        <div><b>Best solo score:</b> <span id="dfp-best">-</span></div>
         <div><b>Faces:</b> <span id="dfp-faces">-</span></div>
       </div>
     `);
